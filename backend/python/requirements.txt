@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+chromadb
+zai-sdk
+python-dotenv
+sqlalchemy
+requests
+sentence-transformers
+python-docx
+python-multipart
+tiktoken
+pdfplumber
