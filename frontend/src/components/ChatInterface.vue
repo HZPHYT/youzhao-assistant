@@ -263,9 +263,13 @@ const sendMessage = async () => {
     }
   } catch (error) {
     console.error('Error sending message:', error);
+    let errorMessage = '抱歉，系统暂时无法响应，请稍后再试。';
+    if (error.response?.data?.detail) {
+      errorMessage = error.response.data.detail;
+    }
     addMessage(currentSessionId.value, {
       role: 'assistant',
-      content: '抱歉，系统暂时无法响应，请稍后再试。',
+      content: errorMessage,
       sources: [],
       metrics: null,
       task_type: null

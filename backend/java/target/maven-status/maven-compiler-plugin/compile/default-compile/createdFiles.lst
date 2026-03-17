@@ -1,0 +1,12 @@
+com/example/backend/aspect/LogAspect.class
+com/example/backend/config/RedisConfig.class
+com/example/backend/service/KnowledgeServiceImpl.class
+com/example/backend/service/RagEvaluationServiceImpl.class
+com/example/backend/controller/RagEvaluationController.class
+com/example/backend/service/RagEvaluationService.class
+com/example/backend/aspect/PermissionAspect.class
+com/example/backend/service/KnowledgeService.class
+com/example/backend/controller/ChatController.class
+com/example/backend/controller/KnowledgeController.class
+com/example/backend/BackendApplication.class
+com/example/backend/service/ChatService.class

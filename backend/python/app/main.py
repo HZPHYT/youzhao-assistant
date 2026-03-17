@@ -24,6 +24,9 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+cache_logger = logging.getLogger("embedding_cache")
+cache_logger.setLevel(logging.INFO)
+cache_logger.addHandler(logging.StreamHandler())
 
 app = FastAPI()
 
@@ -51,9 +54,60 @@ app.add_middleware(
 
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
 embedding_fn = embedding_functions.DefaultEmbeddingFunction()
+
+from functools import lru_cache
+import hashlib
+
+class EmbeddingCache:
+    def __init__(self, max_size=1000):
+        self.cache = {}
+        self.access_order = []
+        self.max_size = max_size
+    
+    def get_key(self, text):
+        return hashlib.md5(text.encode()).hexdigest()
+    
+    def get(self, text):
+        key = self.get_key(text)
+        if key in self.cache:
+            self.access_order.remove(key)
+            self.access_order.append(key)
+            return self.cache[key]
+        return None
+    
+    def set(self, text, embedding):
+        key = self.get_key(text)
+        if key in self.cache:
+            self.access_order.remove(key)
+        elif len(self.cache) >= self.max_size:
+            oldest = self.access_order.pop(0)
+            del self.cache[oldest]
+        self.cache[key] = embedding
+        self.access_order.append(key)
+    
+    def clear(self):
+        self.cache = {}
+        self.access_order = []
+
+embedding_cache = EmbeddingCache(max_size=1000)
+cache_logger = logging.getLogger("embedding_cache")
+
+def get_embedding_with_cache(texts):
+    results = []
+    for text in texts:
+        cached = embedding_cache.get(text)
+        if cached is not None:
+            cache_logger.info(f"[HIT] {text[:30]}...")
+            results.append(cached)
+        else:
+            cache_logger.info(f"[MISS] {text[:30]}...")
+            embedding = embedding_fn([text])[0]
+            embedding_cache.set(text, embedding)
+            results.append(embedding)
+    return results
+
 collection = chroma_client.get_or_create_collection(
-    name="youzhao_knowledge",
-    embedding_function=embedding_fn
+    name="youzhao_knowledge"
 )
 
 api_key = os.getenv("API_KEY", "")
@@ -71,7 +125,7 @@ except Exception as e:
 
 from app.models import SessionLocal, CustomerCredit, CustomerApproval
 from app.agent import AgentExecutor, retry
-from app.monitoring import metrics_collector, StructuredLogger, get_circuit_breaker, track_metrics
+from app.monitoring import metrics_collector, StructuredLogger, get_circuit_breaker, track_metrics, rate_limiter, contains_sensitive_words
 from app.context import conversation_manager
 
 @retry(max_attempts=3, delay=0.5, backoff=2)
@@ -263,9 +317,12 @@ def chunk_text(text, chunk_size=800, overlap=100):
 # 混合检索函数
 def hybrid_search(query, collection, top_k=5, query_words=None):
     # 1. 向量检索
+    cache_logger.info(f"Query embedding for: {query[:30]}...")
+    query_embedding = get_embedding_with_cache([query])[0]
+    
     try:
         vector_results = collection.query(
-            query_texts=[query],
+            query_embeddings=[query_embedding.tolist()],
             n_results=top_k * 2
         )
         vector_docs = vector_results.get("documents", [[]])[0]
@@ -375,8 +432,8 @@ def rag_retrieval(query, top_k=5, max_length=500):
                 paired = list(zip(filtered, filtered_scores, rerank_scores))
                 paired.sort(key=lambda x: x[1] * 0.3 + x[2] * 0.7, reverse=True)
             else:
-                doc_embeddings = embedding_fn(filtered)
-                query_embedding = embedding_fn([query])[0]
+                doc_embeddings = get_embedding_with_cache(filtered)
+                query_embedding = get_embedding_with_cache([query])[0]
                 rerank_scores = np.dot(doc_embeddings, query_embedding)
                 paired = list(zip(filtered, filtered_scores, rerank_scores))
                 paired.sort(key=lambda x: x[1] * 0.5 + x[2] * 0.5, reverse=True)
@@ -559,6 +616,13 @@ def call_llm(prompt):
 # 聊天接口
 @app.post("/api/chat")
 def chat(request: ChatRequest):
+    if not rate_limiter.is_allowed("chat"):
+        raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
+    
+    is_sensitive, sensitive_word = contains_sensitive_words(request.message)
+    if is_sensitive:
+        raise HTTPException(status_code=400, detail=f"内容包含敏感词: {sensitive_word}")
+    
     trace_id = metrics_collector.start_request("/api/chat")
     StructuredLogger.info("chat_request_start", trace_id, message=request.message[:50])
     try:
@@ -567,6 +631,26 @@ def chat(request: ChatRequest):
             session_id = conversation_manager.create_session()
         
         history = conversation_manager.get_history(session_id)
+        
+        MAX_HISTORY = 6
+        if len(history) >= MAX_HISTORY:
+            recent = history[-MAX_HISTORY:]
+            summary_prompt = f"请简洁总结以下对话要点：\n"
+            for msg in history[:-MAX_HISTORY]:
+                role = "用户" if msg["role"] == "user" else "助手"
+                summary_prompt += f"{role}: {msg['content'][:100]}\n"
+            try:
+                summary_response = zhipu_client.chat.completions.create(
+                    model="glm-4.6v-flashx",
+                    messages=[{"role": "user", "content": summary_prompt}],
+                    max_tokens=200
+                )
+                summary = summary_response.choices[0].message.content
+                history = [{"role": "system", "content": f"历史摘要: {summary}"}] + recent
+                conversation_manager.set_history(session_id, history)
+                StructuredLogger.info("context_summarized", trace_id, original_len=len(history), summary_len=len(summary))
+            except Exception as e:
+                history = history[-MAX_HISTORY:]
         
         conversation_manager.add_message(session_id, "user", request.message)
         

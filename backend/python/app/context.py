@@ -35,6 +35,10 @@ class ConversationManager:
     def get_history(self, session_id: str) -> List[Dict]:
         return self.sessions[session_id]["history"]
     
+    def set_history(self, session_id: str, history: List[Dict]):
+        self.sessions[session_id]["history"] = history
+        self.sessions[session_id]["updated_at"] = time.time()
+    
     def get_all_sessions(self) -> List[Dict]:
         sessions = []
         for session_id, data in self.sessions.items():

@@ -4,6 +4,7 @@ import logging
 from functools import wraps
 from collections import defaultdict
 from threading import Lock
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -151,3 +152,38 @@ def get_circuit_breaker(name: str) -> CircuitBreaker:
     if name not in circuit_breakers:
         circuit_breakers[name] = CircuitBreaker(failure_threshold=5, recovery_timeout=60)
     return circuit_breakers[name]
+
+SENSITIVE_WORDS = [
+    "政治敏感", "暴力", "赌博", "毒品", "诈骗", "色情", "谣言",
+    "反动", "恐怖", "分裂", "颠覆", "卖淫", "嫖娼", "贪污", "贿赂"
+]
+
+def contains_sensitive_words(text: str) -> tuple:
+    for word in SENSITIVE_WORDS:
+        if word in text:
+            return True, word
+    return False, None
+
+class RateLimiter:
+    def __init__(self, rate: int = 60, per: int = 60):
+        self.rate = rate
+        self.per = per
+        self.requests = defaultdict(list)
+        self._lock = Lock()
+    
+    def is_allowed(self, key: str = "default") -> bool:
+        with self._lock:
+            now = time.time()
+            self.requests[key] = [t for t in self.requests[key] if now - t < self.per]
+            if len(self.requests[key]) >= self.rate:
+                return False
+            self.requests[key].append(now)
+            return True
+    
+    def get_remaining(self, key: str = "default") -> int:
+        with self._lock:
+            now = time.time()
+            self.requests[key] = [t for t in self.requests[key] if now - t < self.per]
+            return max(0, self.rate - len(self.requests[key]))
+
+rate_limiter = RateLimiter(rate=60, per=60)
